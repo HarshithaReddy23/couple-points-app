@@ -1,9 +1,10 @@
 // Initialize app
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', async function () {
     const db = new DataManager();
     let currentUser = null;
     let coupleData = null;
     let selectedPoints = 0;
+    let unsubscribeCouple = null;
 
     // --- DOM References ---
     const loginPage = document.getElementById('loginPage');
@@ -75,7 +76,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // --- Register ---
-    registerForm.addEventListener('submit', function (e) {
+    registerForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         var fd = new FormData(registerForm);
         var username = (fd.get('username') || '').trim();
@@ -92,11 +93,11 @@ document.addEventListener('DOMContentLoaded', function () {
             return notify('Couple code must be at least 3 characters', 'error');
         }
 
-        if (db.getUser(username)) {
+        if (await db.getUser(username)) {
             return notify('Username already exists', 'error');
         }
 
-        var couple = db.getCouple(coupleCode);
+        var couple = await db.getCouple(coupleCode);
         if (!couple) {
             couple = {
                 code: coupleCode,
@@ -122,18 +123,18 @@ document.addEventListener('DOMContentLoaded', function () {
             couple.name = couple.users[0] + ' & ' + couple.users[1];
         }
 
-        db.saveUser(user);
-        db.saveCouple(couple);
+        await db.saveUser(user);
+        await db.saveCouple(couple);
 
         currentUser = user;
         coupleData = couple;
         db.saveSession(currentUser);
-        showDashboard();
+        await showDashboard();
         notify('Account created successfully!', 'success');
     });
 
     // --- Login ---
-    loginForm.addEventListener('submit', function (e) {
+    loginForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         var fd = new FormData(loginForm);
         var username = (fd.get('username') || '').trim();
@@ -143,12 +144,12 @@ document.addEventListener('DOMContentLoaded', function () {
             return notify('Please enter both username and password', 'error');
         }
 
-        var user = db.getUser(username);
+        var user = await db.getUser(username);
         if (!user || user.password !== password) {
             return notify('Invalid username or password', 'error');
         }
 
-        var couple = db.getCouple(user.coupleCode);
+        var couple = await db.getCouple(user.coupleCode);
         if (!couple) {
             return notify('Couple data not found. Please register again.', 'error');
         }
@@ -156,26 +157,46 @@ document.addEventListener('DOMContentLoaded', function () {
         currentUser = user;
         coupleData = couple;
         db.saveSession(currentUser);
-        showDashboard();
+        await showDashboard();
     });
 
     // --- Show Dashboard ---
-    function showDashboard() {
+    async function showDashboard() {
         loginPage.classList.remove('active');
         dashboardPage.classList.add('active');
-        refreshDashboard();
+        await refreshDashboard();
         refreshHistory();
         refreshProfile();
         refreshPendingRequests();
+        startRealtimeSync();
+    }
+
+    // --- Real-time Sync (auto-updates when partner makes changes) ---
+    function startRealtimeSync() {
+        stopRealtimeSync();
+        if (!coupleData || !coupleData.code) return;
+        unsubscribeCouple = db.onCoupleChange(coupleData.code, async function (updatedCouple) {
+            coupleData = updatedCouple;
+            await refreshDashboard();
+            refreshHistory();
+            refreshProfile();
+            refreshPendingRequests();
+        });
+    }
+
+    function stopRealtimeSync() {
+        if (unsubscribeCouple) {
+            unsubscribeCouple();
+            unsubscribeCouple = null;
+        }
     }
 
     // --- Refresh Dashboard ---
-    function refreshDashboard() {
+    async function refreshDashboard() {
         coupleNameEl.textContent = coupleData.name;
 
-        var users = db.getUsers();
-        var u1 = users[coupleData.users[0]];
-        var u2 = coupleData.users[1] ? users[coupleData.users[1]] : null;
+        var u1 = coupleData.users[0] ? await db.getUser(coupleData.users[0]) : null;
+        var u2 = coupleData.users[1] ? await db.getUser(coupleData.users[1]) : null;
 
         user1NameEl.textContent = u1 ? u1.username : 'Waiting...';
         user1PointsEl.textContent = u1 ? u1.points : 0;
@@ -192,7 +213,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         // Update current user points from store (may have changed)
-        currentUser = db.getUser(currentUser.username) || currentUser;
+        currentUser = (await db.getUser(currentUser.username)) || currentUser;
     }
 
     // --- Points Selection ---
@@ -222,7 +243,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // --- Give Points ---
-    givePointsBtn.addEventListener('click', function () {
+    givePointsBtn.addEventListener('click', async function () {
         if (selectedPoints === 0) return notify('Please select points to give', 'error');
 
         var reason = reasonText.value.trim();
@@ -231,14 +252,14 @@ document.addEventListener('DOMContentLoaded', function () {
         var partnerName = coupleData.users.find(function (u) { return u !== currentUser.username; });
         if (!partnerName) return notify('Partner not found. Ask them to register with your couple code.', 'error');
 
-        var partner = db.getUser(partnerName);
+        var partner = await db.getUser(partnerName);
         if (!partner) return notify('Partner not found', 'error');
 
         var gave = selectedPoints;
 
         // Update partner points
         partner.points += gave;
-        db.saveUser(partner);
+        await db.saveUser(partner);
 
         // Save history
         coupleData.pointsHistory.push({
@@ -248,34 +269,34 @@ document.addEventListener('DOMContentLoaded', function () {
             reason: reason,
             date: new Date().toISOString()
         });
-        db.saveCouple(coupleData);
+        await db.saveCouple(coupleData);
 
         // Reset & refresh
         reasonText.value = '';
         selectedPoints = 0;
         document.querySelectorAll('#giveContent .point-option').forEach(function (o) { o.classList.remove('selected'); });
         showModal('You gave ' + gave + ' points to ' + partnerName + '!');
-        refreshDashboard();
+        await refreshDashboard();
         refreshHistory();
         refreshProfile();
     });
 
     // --- Reduce Points ---
-    reducePointsBtn.addEventListener('click', function () {
+    reducePointsBtn.addEventListener('click', async function () {
         if (selectedPoints === 0) return notify('Please select points to use', 'error');
 
         var reason = reduceReasonText.value.trim();
         if (!reason) return notify('Please provide a reason', 'error');
 
         // Refresh current user from store
-        currentUser = db.getUser(currentUser.username) || currentUser;
+        currentUser = (await db.getUser(currentUser.username)) || currentUser;
 
         if (currentUser.points < selectedPoints) {
             return notify("You don't have enough points!", 'error');
         }
 
         currentUser.points -= selectedPoints;
-        db.saveUser(currentUser);
+        await db.saveUser(currentUser);
         db.saveSession(currentUser);
 
         coupleData.pointsHistory.push({
@@ -286,7 +307,7 @@ document.addEventListener('DOMContentLoaded', function () {
             date: new Date().toISOString(),
             type: 'usage'
         });
-        db.saveCouple(coupleData);
+        await db.saveCouple(coupleData);
 
         reduceReasonText.value = '';
         var used = selectedPoints;
@@ -294,13 +315,13 @@ document.addEventListener('DOMContentLoaded', function () {
         document.querySelectorAll('#reduceContent .point-option').forEach(function (o) { o.classList.remove('selected'); });
         currentPointsDisplay.textContent = currentUser.points;
         showModal('You used ' + used + ' points!');
-        refreshDashboard();
+        await refreshDashboard();
         refreshHistory();
         refreshProfile();
     });
 
     // --- Request Points ---
-    requestPointsBtn.addEventListener('click', function () {
+    requestPointsBtn.addEventListener('click', async function () {
         if (selectedPoints === 0) return notify('Please select how many points to request', 'error');
 
         var reason = requestReasonText.value.trim();
@@ -323,7 +344,7 @@ document.addEventListener('DOMContentLoaded', function () {
         };
 
         coupleData.requests.push(req);
-        db.saveCouple(coupleData);
+        await db.saveCouple(coupleData);
 
         var requested = selectedPoints;
         requestReasonText.value = '';
@@ -375,7 +396,7 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    function handleRequest(reqId, action) {
+    async function handleRequest(reqId, action) {
         var req = coupleData.requests.find(function (r) { return r.id === reqId; });
         if (!req) return;
 
@@ -383,11 +404,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (action === 'accepted') {
             // Give points from current user (acceptor) to requester
-            var requester = db.getUser(req.from);
+            var requester = await db.getUser(req.from);
             if (!requester) return notify('Requester not found', 'error');
 
             requester.points += req.points;
-            db.saveUser(requester);
+            await db.saveUser(requester);
 
             // Add to history
             coupleData.pointsHistory.push({
@@ -414,8 +435,8 @@ document.addEventListener('DOMContentLoaded', function () {
             notify('Request from ' + req.from + ' declined', 'info');
         }
 
-        db.saveCouple(coupleData);
-        refreshDashboard();
+        await db.saveCouple(coupleData);
+        await refreshDashboard();
         refreshHistory();
         refreshProfile();
         refreshPendingRequests();
@@ -504,7 +525,7 @@ document.addEventListener('DOMContentLoaded', function () {
         totalReceivedEl.textContent = received;
         totalUsedEl.textContent = used;
 
-        dataInfo.innerHTML = '<small>Storage used: ' + db.getStorageSize() + '</small>';
+        dataInfo.innerHTML = '<small>Data synced to cloud</small>';
     }
 
     // --- Nav Tabs ---
@@ -520,6 +541,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // --- Logout ---
     logoutBtn.addEventListener('click', function () {
+        stopRealtimeSync();
         currentUser = null;
         coupleData = null;
         selectedPoints = 0;
@@ -537,8 +559,8 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // --- Export / Import ---
-    exportBtn.addEventListener('click', function () {
-        db.exportData();
+    exportBtn.addEventListener('click', async function () {
+        await db.exportData();
         notify('Data exported!', 'success');
     });
     importBtn.addEventListener('click', function () { importFile.click(); });
@@ -557,14 +579,14 @@ document.addEventListener('DOMContentLoaded', function () {
     // --- Restore Session on Load ---
     var saved = db.getSession();
     if (saved) {
-        var user = db.getUser(saved.username);
+        var user = await db.getUser(saved.username);
         if (user) {
-            var couple = db.getCouple(user.coupleCode);
+            var couple = await db.getCouple(user.coupleCode);
             if (couple) {
                 currentUser = user;
                 coupleData = couple;
                 db.saveSession(currentUser);
-                showDashboard();
+                await showDashboard();
             } else {
                 db.clearSession();
             }

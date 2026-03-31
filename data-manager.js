@@ -1,75 +1,80 @@
 /**
  * Data Manager for Couple Points App
- * Uses localStorage with keys: cp_users, cp_couples
+ * Uses Firebase Firestore for cloud storage
+ * Collections: users, couples
  */
 class DataManager {
     constructor() {
-        this.USERS_KEY = 'cp_users';
-        this.COUPLES_KEY = 'cp_couples';
+        this.db = firestore;
         this.SESSION_KEY = 'cp_session';
     }
 
     // --- Users ---
-    getUsers() {
+    async getUsers() {
         try {
-            return JSON.parse(localStorage.getItem(this.USERS_KEY)) || {};
+            const snapshot = await this.db.collection('users').get();
+            const users = {};
+            snapshot.forEach(function (doc) {
+                users[doc.id] = doc.data();
+            });
+            return users;
         } catch (e) {
             console.error('getUsers error:', e);
             return {};
         }
     }
 
-    saveUsers(users) {
+    async getUser(username) {
         try {
-            localStorage.setItem(this.USERS_KEY, JSON.stringify(users));
-            return true;
+            const doc = await this.db.collection('users').doc(username).get();
+            return doc.exists ? doc.data() : null;
         } catch (e) {
-            console.error('saveUsers error:', e);
-            return false;
+            console.error('getUser error:', e);
+            return null;
         }
     }
 
-    getUser(username) {
-        return this.getUsers()[username] || null;
-    }
-
-    saveUser(user) {
-        const users = this.getUsers();
-        users[user.username] = user;
-        return this.saveUsers(users);
+    async saveUser(user) {
+        try {
+            await this.db.collection('users').doc(user.username).set(user);
+            return true;
+        } catch (e) {
+            console.error('saveUser error:', e);
+            return false;
+        }
     }
 
     // --- Couples ---
-    getCouples() {
+    async getCouple(code) {
         try {
-            return JSON.parse(localStorage.getItem(this.COUPLES_KEY)) || {};
+            const doc = await this.db.collection('couples').doc(code).get();
+            return doc.exists ? doc.data() : null;
         } catch (e) {
-            console.error('getCouples error:', e);
-            return {};
+            console.error('getCouple error:', e);
+            return null;
         }
     }
 
-    saveCouples(couples) {
+    async saveCouple(couple) {
         try {
-            localStorage.setItem(this.COUPLES_KEY, JSON.stringify(couples));
+            await this.db.collection('couples').doc(couple.code).set(couple);
             return true;
         } catch (e) {
-            console.error('saveCouples error:', e);
+            console.error('saveCouple error:', e);
             return false;
         }
     }
 
-    getCouple(code) {
-        return this.getCouples()[code] || null;
+    // --- Real-time listener for couple data ---
+    onCoupleChange(code, callback) {
+        return this.db.collection('couples').doc(code).onSnapshot(function (doc) {
+            if (doc.exists) {
+                callback(doc.data());
+            }
+        });
     }
 
-    saveCouple(couple) {
-        const couples = this.getCouples();
-        couples[couple.code] = couple;
-        return this.saveCouples(couples);
-    }
-
-    // --- Session ---
+    // --- Session (stays in browser sessionStorage) ---
     saveSession(user) {
         sessionStorage.setItem(this.SESSION_KEY, JSON.stringify(user));
     }
@@ -88,10 +93,17 @@ class DataManager {
     }
 
     // --- Export / Import ---
-    exportData() {
+    async exportData() {
+        const users = await this.getUsers();
+        const couplesSnapshot = await this.db.collection('couples').get();
+        const couples = {};
+        couplesSnapshot.forEach(function (doc) {
+            couples[doc.id] = doc.data();
+        });
+
         const data = {
-            users: this.getUsers(),
-            couples: this.getCouples(),
+            users: users,
+            couples: couples,
             exportDate: new Date().toISOString()
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -106,34 +118,30 @@ class DataManager {
     }
 
     importData(file) {
-        return new Promise((resolve, reject) => {
+        const self = this;
+        return new Promise(function (resolve, reject) {
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = async function (e) {
                 try {
                     const data = JSON.parse(e.target.result);
                     if (!data.users || !data.couples) {
                         throw new Error('Invalid backup file');
                     }
-                    this.saveUsers(data.users);
-                    this.saveCouples(data.couples);
+                    const batch = self.db.batch();
+                    for (const username of Object.keys(data.users)) {
+                        batch.set(self.db.collection('users').doc(username), data.users[username]);
+                    }
+                    for (const code of Object.keys(data.couples)) {
+                        batch.set(self.db.collection('couples').doc(code), data.couples[code]);
+                    }
+                    await batch.commit();
                     resolve(true);
                 } catch (err) {
                     reject(err);
                 }
             };
-            reader.onerror = () => reject(new Error('File read error'));
+            reader.onerror = function () { reject(new Error('File read error')); };
             reader.readAsText(file);
         });
-    }
-
-    // --- Stats ---
-    getStorageSize() {
-        let total = 0;
-        for (let key in localStorage) {
-            if (localStorage.hasOwnProperty(key)) {
-                total += localStorage[key].length + key.length;
-            }
-        }
-        return (total / 1024).toFixed(2) + ' KB';
     }
 }
